@@ -1,43 +1,77 @@
-/**
- * Welcome to Cloudflare Workers!
- *
- * This is a template for a Queue consumer: a Worker that can consume from a
- * Queue: https://developers.cloudflare.com/queues/get-started/
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import Bot from "./requests/bot";
+import { ImageFetchRequest } from "./types/imageFetchRequest";
+import { ReqData } from "./types/reqData";
+import { TelegramPhotoSize } from "./types/telegram";
 
 export interface Env {
-	// Example binding to a Queue. Learn more at https://developers.cloudflare.com/queues/javascript-apis/
-	MY_QUEUE: Queue;
+	ASSETS_STORE: R2Bucket;
+	IMAGE_FETCH_QUEUE: Queue<ImageFetchRequest>;
+	AVATAR_META: KVNamespace;
 }
 
 export default {
-	// Our fetch handler is invoked on a HTTP request: we can send a message to a queue
-	// during (or after) a request.
-	// https://developers.cloudflare.com/queues/platform/javascript-apis/#producer
-	async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		// To send a message on a queue, we need to create the queue first
-		// https://developers.cloudflare.com/queues/get-started/#3-create-a-queue
-		await env.MY_QUEUE.send({
-			url: req.url,
-			method: req.method,
-			headers: Object.fromEntries(req.headers),
-		});
-		return new Response('Sent message to the queue');
+	async fetch(req: Request, env: Env): Promise<Response> {
+		const data = await req.json() as ReqData
+		const bot = new Bot(data.botToken)
+		switch (data.type) {
+			case "batchFetchAvatar": {
+				for (const userId of data.userIds) {
+					console.log(userId)
+					try {
+						await env.AVATAR_META.put(`updateTime:${userId}`, new Date().getTime().toString());
+						const avatarReq = await bot.getUserProfilePhotos(userId, 0, 1);
+						const avatars = (await avatarReq.json()) as any;
+						console.log(avatars);
+						if (!avatars.result.total_count) continue
+
+						const avatar = avatars.result.photos[0][
+							avatars.result.photos[0].length - 1
+						] as TelegramPhotoSize;
+						await env.AVATAR_META.put(`photoId:${userId}`, avatar.file_id);
+
+						await env.IMAGE_FETCH_QUEUE.send({
+							type: 'image',
+							botToken: data.botToken,
+							fileId: avatar.file_id
+						})
+					}
+					catch (e) {
+						console.log(e)
+					}
+				}
+				break
+			}
+			case "batchFetchImage": {
+				await env.IMAGE_FETCH_QUEUE.sendBatch(data.fileIds.map(fileId => ({
+					body: {
+						botToken: data.botToken,
+						fileId,
+						type: 'image'
+					}
+				})))
+				break
+			}
+		}
+		return new Response('ok')
 	},
-	// The queue handler is invoked when a batch of messages is ready to be delivered
-	// https://developers.cloudflare.com/queues/platform/javascript-apis/#messagebatch
-	async queue(batch: MessageBatch<Error>, env: Env): Promise<void> {
-		// A queue consumer can make requests to other endpoints on the Internet,
-		// write to R2 object storage, query a D1 Database, and much more.
+	async queue(batch: MessageBatch<ImageFetchRequest>, env: Env): Promise<void> {
 		for (let message of batch.messages) {
-			// Process each message (we'll just log these)
-			console.log(`message ${message.id} processed: ${JSON.stringify(message.body)}`);
+			console.log(message.body)
+			try {
+				if (await env.ASSETS_STORE.head(`files/${message.body.fileId}`)) {
+					console.log('file exists')
+					message.ack()
+					continue;
+				}
+				const bot = new Bot(message.body.botToken)
+				const fileUrl = await bot.getFile(message.body.fileId)
+				const file = await fetch(fileUrl);
+				await env.ASSETS_STORE.put(`files/${message.body.fileId}`, file.body)
+			}
+			catch (e) {
+				console.log(e)
+				message.retry()
+			}
 		}
 	},
 };
