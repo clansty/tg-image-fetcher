@@ -1,4 +1,5 @@
 import Bot from "./requests/bot";
+import fetchAvatarWithMtproto from "./requests/fetchAvatarWithMtproto";
 import { ImageFetchRequest } from "./types/imageFetchRequest";
 import { ReqData } from "./types/reqData";
 import { TelegramPhotoSize } from "./types/telegram";
@@ -7,6 +8,8 @@ export interface Env {
 	ASSETS_STORE: R2Bucket;
 	IMAGE_FETCH_QUEUE: Queue<ImageFetchRequest>;
 	AVATAR_META: KVNamespace;
+	API_ID: string;
+	API_HASH: string;
 }
 
 export default {
@@ -21,7 +24,17 @@ export default {
 						const avatarReq = await bot.getUserProfilePhotos(userId, 0, 1);
 						const avatars = (await avatarReq.json()) as any;
 						console.log(avatars);
-						if (!avatars.result.total_count) continue
+						if (!avatars.result.total_count) {
+							try {
+								const avatar = await fetchAvatarWithMtproto(data.botToken, Number(env.API_ID), env.API_HASH, userId) as Buffer;
+								await env.AVATAR_META.put(`photoId:${userId}`, `fallbackAvatar-${userId}`);
+								await env.ASSETS_STORE.put(`files/fallbackAvatar-${userId}`, avatar);
+							}
+							catch (e) {
+								console.log(e);
+							}
+							continue;
+						}
 
 						const avatar = avatars.result.photos[0][
 							avatars.result.photos[0].length - 1
@@ -90,7 +103,7 @@ export default {
 				console.log('获取文件', fileId)
 				const fileUrl = await bot.getFile(fileId)
 				const file = await fetch(fileUrl);
-				await env.ASSETS_STORE.put(`files/${fileId}`, file.body)
+				await env.ASSETS_STORE.put(`files/${fileId}`, file.body as ReadableStream)
 				message.ack()
 			}
 			catch (e) {
