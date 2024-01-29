@@ -6,6 +6,9 @@ kv_namespaces = [
   { binding = "AVATAR_META", id = "41062a4d63c4486d9178710b5e28f0c5" }
 ]
 
+[vars]
+AVATAR_AGENT = "https://avatar-agent.init.ink"
+
 [[queues.consumers]]
 queue = "tg-image-fetcher"
 

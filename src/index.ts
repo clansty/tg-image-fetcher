@@ -7,6 +7,24 @@ export interface Env {
 	ASSETS_STORE: R2Bucket;
 	IMAGE_FETCH_QUEUE: Queue<ImageFetchRequest>;
 	AVATAR_META: KVNamespace;
+	AVATAR_AGENT: string;
+	CLIENT_ID: string;
+	CLIENT_SECRET: string;
+}
+
+const tryFetchFallbackAvatar = async (userId: number, env: Env) => {
+	const fallback = await fetch(`${env.AVATAR_AGENT}/avatar/${userId}`, {
+		headers: {
+			'CF-Access-Client-Id': env.CLIENT_ID,
+			'CF-Access-Client-Secret': env.CLIENT_SECRET,
+		}
+	});
+	if (!fallback.ok) return;
+
+	console.log("Fetched fallback avatar");
+	const fileId = `fallback-${userId}`;
+	await env.AVATAR_META.put(`photoId:${userId}`, fileId);
+	await env.ASSETS_STORE.put(`files/${fileId}`, await fallback.arrayBuffer());
 }
 
 export default {
@@ -21,7 +39,10 @@ export default {
 						const avatarReq = await bot.getUserProfilePhotos(userId, 0, 1);
 						const avatars = (await avatarReq.json()) as any;
 						console.log(avatars);
-						if (!avatars.result.total_count) continue
+						if (!avatars.result.total_count) {
+							await tryFetchFallbackAvatar(userId, env);
+							continue;
+						}
 
 						const avatar = avatars.result.photos[0][
 							avatars.result.photos[0].length - 1
@@ -70,6 +91,9 @@ export default {
 						console.log(avatars);
 						if (!avatars.result.total_count) {
 							console.log('无头像', message.body.userId)
+
+							await tryFetchFallbackAvatar(message.body.userId, env);
+
 							message.ack()
 							continue
 						}
